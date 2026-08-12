@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微信聊天记录导出</title>
+<style>
+  :root{ --green:#07C160; --green-d:#06a854; --bg:#f4f5f7; --card:#fff; --line:#e5e7eb; --muted:#8a8f99; --ink:#1f2328; }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.6 -apple-system,"PingFang SC",sans-serif;background:var(--bg);color:var(--ink)}
+  .wrap{max-width:520px;margin:0 auto;padding:16px}
+  h1{font-size:18px;margin:4px 0 2px}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+  label{font-size:13px}
+  .row{display:flex;align-items:center;gap:8px;margin:8px 0}
+  input[type=number],input[type=text]{border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:inherit;width:100%}
+  input[type=number]{width:90px}
+  .btn{background:var(--green);color:#fff;border:0;border-radius:9px;padding:10px 16px;font:inherit;font-weight:600;cursor:pointer}
+  .btn:hover{background:var(--green-d)} .btn:disabled{opacity:.5;cursor:default}
+  .btn.ghost{background:#eef0f2;color:var(--ink)}
+  .btn.danger{background:#e5484d}
+  .btn.danger:hover{background:#d13438}
+  .hint{background:#fff8e6;border:1px solid #ffe28a;border-radius:8px;padding:8px 10px;font-size:12.5px;color:#7a5b00;margin:8px 0}
+  #log{font:12px/1.5 ui-monospace,Menlo,monospace;background:#0d1117;color:#c9d1d9;border-radius:8px;padding:10px;height:120px;overflow:auto;white-space:pre-wrap;display:none}
+  .hidden{display:none}
+  .imgWrap{position:relative;width:480px;max-height:calc(100vh - 420px);min-height:240px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  .imgWrap img{display:block;width:480px}
+  .zone{position:absolute;left:0;width:480px;cursor:pointer}
+  .zone:hover{background:rgba(7,193,96,.18)}
+  .zone.start{background:rgba(7,193,96,.30);box-shadow:inset 0 2px 0 var(--green)}
+  .zone.end{background:rgba(7,193,96,.30);box-shadow:inset 0 -2px 0 var(--green)}
+  .zone.inrange{background:rgba(7,193,96,.16)}
+  .selinfo{font-size:13px;color:var(--muted);margin:8px 0}
+  .fmts{display:flex;gap:14px;margin:10px 0}
+  .ok{color:var(--green);font-weight:600}
+  .err{color:#d33;font-size:13px;margin-top:6px}
+  a.reveal{color:var(--green);cursor:pointer;text-decoration:underline;font-size:13px}
+  code{background:#eef0f2;padding:1px 5px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>微信聊天记录导出</h1>
+  <div class="sub">把微信当前打开的会话导出成 Word / Markdown · 本地运行不联网</div>
+
+  <div class="card" id="cfg">
+    <div class="hint">先在微信里 <b>点开要导出的会话</b>，并把聊天滚到你想开始的位置。点「开始抓取」后，会从<b>当前顶部位置往下</b>抓到最新消息。抓取时自动滚动微信，<b>期间请勿操作鼠标键盘</b>。<br>⛔ 想中途停下：按 <b>⌃⌥⌘ + .（句号）</b>；或在 Dock 里点开本 App，按「停止抓取」。</div>
+    <div class="row">
+      <label>最多滚动屏数</label>
+      <input type="number" id="maxSteps" value="200" min="5" max="2000">
+      <span style="color:var(--muted);font-size:12px">从当前位置往下最多抓多少屏（到最新为止）</span>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="voice"> 语音自动转文字（实验，较慢）</label>
+    </div>
+    <div class="row">
+      <button class="btn" id="startBtn">开始抓取</button>
+      <button class="btn danger hidden" id="stopBtn">停止抓取</button>
+    </div>
+  </div>
+
+  <pre id="log"></pre>
+
+  <div class="card hidden" id="previewCard">
+    <div class="row">
+      <label>文件名 / 标题</label>
+      <input type="text" id="titleInput" placeholder="会话名">
+    </div>
+    <div class="selinfo" id="selInfo">👉 在下图里 <b>点一条消息作为「开始」</b>，再 <b>点一条作为「结束」</b>（不选则导出全部）</div>
+    <div class="imgWrap" id="imgWrap"></div>
+    <div class="fmts">
+      <label><input type="checkbox" id="fmtDocx" checked> Word (.docx)</label>
+      <label><input type="checkbox" id="fmtMd" checked> Markdown (.md)</label>
+    </div>
+    <div class="row">
+      <button class="btn" id="exportBtn">导出</button>
+      <button class="btn ghost" id="resetSel">清除选择</button>
+      <a class="reveal" style="margin-left:auto" onclick="openFolder()">打开导出文件夹</a>
+    </div>
+    <div id="result" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<script>
+let MSGS=[], startI=null, endI=null;
+
+window.addLog = function(m){
+  const el=document.getElementById('log');
+  el.style.display='block';
+  el.textContent += m + "\n";
+  el.scrollTop = el.scrollHeight;
+};
+
+function api(){ return window.pywebview.api; }
+function $(id){ return document.getElementById(id); }
+
+// 记住上次的设置
+try{
+  const p=JSON.parse(localStorage.getItem('wxexport_prefs')||'{}');
+  if(p.maxSteps) $('maxSteps').value=p.maxSteps;
+  if(typeof p.voice==='boolean') $('voice').checked=p.voice;
+  if(typeof p.docx==='boolean') $('fmtDocx').checked=p.docx;
+  if(typeof p.md==='boolean') $('fmtMd').checked=p.md;
+}catch(e){}
+function savePrefs(){
+  localStorage.setItem('wxexport_prefs', JSON.stringify({
+    maxSteps:$('maxSteps').value, voice:$('voice').checked,
+    docx:$('fmtDocx').checked, md:$('fmtMd').checked}));
+}
+
+$('startBtn').onclick = async ()=>{
+  const btn=$('startBtn'), stop=$('stopBtn');
+  const env = await api().check_env();
+  if(!env.ok){ alert(env.msg); return; }
+  savePrefs();
+  btn.disabled=true; btn.textContent='抓取中…';
+  stop.classList.remove('hidden'); stop.disabled=false; stop.textContent='停止抓取';
+  $('log').textContent='';
+  const max=parseInt($('maxSteps').value)||200;
+  const res = await api().capture(max, $('voice').checked);
+  btn.disabled=false; btn.textContent='重新抓取';
+  stop.classList.add('hidden');
+  if(!res.ok){ addLog('✗ '+res.msg); return; }
+  buildPreview(res);
+};
+
+$('stopBtn').onclick = async ()=>{
+  const stop=$('stopBtn');
+  stop.disabled=true; stop.textContent='正在停止…';
+  await api().stop();
+};
+
+function zoneTitle(m){
+  if(m.type==='system') return '系统: '+m.text;
+  const who = m.sender==='me' ? '我' : (m.name||'对方');
+  return who+': '+m.text;
+}
+
+function buildPreview(res){
+  MSGS=res.messages; startI=null; endI=null;
+  $('previewCard').classList.remove('hidden');
+  $('titleInput').value = res.title||'';
+  $('result').innerHTML='';
+  const wrap=$('imgWrap');
+  wrap.innerHTML='';
+  const img=new Image();
+  img.src='data:image/png;base64,'+res.img;
+  wrap.appendChild(img);
+  MSGS.forEach(m=>{
+    if(m.type==='time') return;
+    const z=document.createElement('div');
+    z.className='zone'; z.style.top=m.y0+'px'; z.style.height=Math.max(6,m.y1-m.y0)+'px';
+    z.title=zoneTitle(m);
+    z.onclick=()=>pick(m.i);
+    z.dataset.i=m.i;
+    wrap.appendChild(z);
+  });
+  updateSel();
+  $('previewCard').scrollIntoView({behavior:'smooth'});
+}
+
+function pick(i){
+  if(startI===null){ startI=i; }
+  else if(endI===null){ endI=i; }
+  else { startI=i; endI=null; }
+  updateSel();
+}
+
+function updateSel(){
+  const zones=document.querySelectorAll('.zone');
+  let lo=startI, hi=endI;
+  if(lo!==null&&hi!==null&&lo>hi){ [lo,hi]=[hi,lo]; }
+  zones.forEach(z=>{
+    const i=parseInt(z.dataset.i);
+    z.classList.remove('start','end','inrange');
+    if(startI!==null&&i===startI) z.classList.add('start');
+    if(endI!==null&&i===endI) z.classList.add('end');
+    if(lo!==null&&hi!==null&&i>lo&&i<hi) z.classList.add('inrange');
+  });
+  const info=$('selInfo');
+  if(startI===null) info.innerHTML='👉 点一条消息作为「开始」，再点一条作为「结束」（不选则导出<b>全部</b>）';
+  else if(endI===null) info.innerHTML='已选「开始」，请再点一条作为「结束」';
+  else { const n=Math.abs(hi-lo)+1; info.innerHTML=`已选中约 <b>${n}</b> 条消息，可导出`; }
+}
+
+$('resetSel').onclick=()=>{ startI=null; endI=null; updateSel(); };
+
+$('exportBtn').onclick=async ()=>{
+  const fmts=[]; if($('fmtDocx').checked)fmts.push('docx');
+  if($('fmtMd').checked)fmts.push('md');
+  if(!fmts.length){ alert('请至少勾选一种格式'); return; }
+  savePrefs();
+  const name=$('titleInput').value;
+  const btn=$('exportBtn'); btn.disabled=true; btn.textContent='导出中…';
+  const res=await api().export(startI, endI, fmts, name);
+  btn.disabled=false; btn.textContent='导出';
+  const box=$('result');
+  if(!res.ok){ box.innerHTML='<div class="err">✗ '+res.msg+'</div>'; return; }
+  let html='<div class="ok">✓ 已导出 '+res.count+' 条消息到「导出结果」文件夹：</div>';
+  res.outputs.forEach(o=>{ html+='<div>· <code>'+o.split('/').pop()+'</code> &nbsp;<a class="reveal" onclick="reveal(\''+o.replace(/'/g,"\\'")+'\')">在访达中显示</a></div>'; });
+  box.innerHTML=html;
+};
+
+function reveal(p){ api().reveal(p); }
+function openFolder(){ api().open_folder(); }
+</script>
+</body>
+</html>
