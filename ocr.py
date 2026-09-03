@@ -6,6 +6,15 @@ import Vision
 import Quartz
 from Foundation import NSURL
 
+# pyobjc 的框架符号是「第一次访问时才去解析」的，而这个解析过程不是线程安全的：
+# 分片 OCR 并行跑时两个线程同时首次访问同一个符号，实测抛
+# KeyError: 'CGImageSourceCreateImageAtIndex'。在这里(单线程的导入期)先摸一遍，
+# 之后多线程访问到的都是已解析好的属性。
+_WARM = (Quartz.CGImageSourceCreateWithURL, Quartz.CGImageSourceCreateImageAtIndex,
+         Quartz.CGImageGetWidth, Quartz.CGImageGetHeight,
+         Vision.VNRecognizeTextRequest, Vision.VNImageRequestHandler,
+         Vision.VNRequestTextRecognitionLevelAccurate)
+
 
 def ocr_image(path):
     url = NSURL.fileURLWithPath_(path)
@@ -47,22 +56,37 @@ def ocr_image_sliced(path, slice_h=1800, overlap=240):
     W, H = im.size
     if H <= slice_h:
         return ocr_image(path)
-    lines = []
-    y = 0
+    # 各分片互不依赖，并行跑。Vision 是 ObjC 框架调用，执行期间会放开 GIL，
+    # 所以线程池能真正跑满多核；长会话的 OCR 是整个导出里最慢的一步。
+    from concurrent.futures import ThreadPoolExecutor
     tmpd = tempfile.mkdtemp()
+    offsets = []
+    y = 0
     while y < H:
-        y1 = min(H, y + slice_h)
-        crop = im.crop((0, y, W, y1))
-        fp = os.path.join(tmpd, f"s_{y}.png")
-        crop.save(fp)
-        part, _, _ = ocr_image(fp)
-        for l in part:
-            l = dict(l); l["y"] += y
-            lines.append(l)
-        os.remove(fp)
-        if y1 >= H:
+        offsets.append(y)
+        if y + slice_h >= H:
             break
         y += slice_h - overlap
+
+    def run_slice(y):
+        y1 = min(H, y + slice_h)
+        fp = os.path.join(tmpd, f"s_{y}.png")
+        im.crop((0, y, W, y1)).save(fp)
+        try:
+            part, _, _ = ocr_image(fp)
+        finally:
+            os.remove(fp)
+        out = []
+        for l in part:
+            l = dict(l); l["y"] += y
+            out.append(l)
+        return out
+
+    workers = min(6, max(1, len(offsets)))
+    lines = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for part in ex.map(run_slice, offsets):
+            lines.extend(part)
     # 去重(重叠区同一行出现两次)：同一位置的两次识别文本可能略有差异
     # (多个空格/图标符号)，故按"归一化后互相包含 + x范围重叠"判断物理重复
     def _n(s):

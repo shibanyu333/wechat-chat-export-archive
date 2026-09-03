@@ -34,12 +34,24 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
                 lines.append(f"**{who}：** *[{tag}]* {body}".rstrip())
             else:
                 lines.append(f"**{who}：** {body}")
+        elif m["type"] == "file":
+            size = m.get("fsize_real") or m.get("fsize") or ""
+            lines.append(f"**{who}：** 📎 **{m['fname']}**" + (f"（{size}）" if size else ""))
+            if m.get("fcopy"):
+                lines.append(f"> 已复制到：[`{m['fcopy']}`]({m['fcopy'].replace(' ', '%20')})")
+            if m.get("fpath"):
+                lines.append(f"> 微信原始位置：`{m['fpath']}`")
+            if m.get("fnote"):
+                lines.append(f"> ⚠️ {m['fnote']}")
         else:  # media
             crop = im.crop((m["x0"], m["y0"], m["x1"], m["y1"]))
             n_img += 1
             fn = f"img_{n_img:03d}.png"
             crop.save(os.path.join(media_dir, fn))
-            lines.append(f"**{who}：** ![图片]({media_name}/{fn})")
+            # 会话名常带空格(如"建站6132 （3）")，链接里的空格必须转义，
+            # 否则标准 Markdown 渲染器会把路径截断，图片全裂
+            rel = f"{media_name}/{fn}".replace(" ", "%20")
+            lines.append(f"**{who}：** ![图片]({rel})")
         lines.append("")
 
     with open(out_path, "w", encoding="utf-8") as f:

@@ -10,6 +10,9 @@ import numpy as np
 from PIL import Image
 import Quartz
 
+# 微信主窗口的标题(子窗如「图片和视频」「XX的聊天记录」不在此列)
+MAIN_TITLES = ("微信", "WeChat", "Weixin", "微信 (测试版)")
+
 
 def find_main_window():
     wins = Quartz.CGWindowListCopyWindowInfo(
@@ -28,7 +31,11 @@ def find_main_window():
             })
     if not cands:
         raise RuntimeError("未找到微信窗口，请确认微信主窗口已打开（未最小化）")
-    return max(cands, key=lambda w: w["w"] * w["h"])
+    # 主窗标题固定是「微信 / WeChat」；图片预览窗、"XX的聊天记录"搜索窗等子窗
+    # 有各自标题，而且常常比主窗更大(实测 图片和视频 825x798 > 主窗 882x640)，
+    # 只按面积挑会挑到子窗、抓出一堆废图。所以先按标题锁定主窗。
+    main = [c for c in cands if c["name"].strip() in MAIN_TITLES]
+    return max(main or cands, key=lambda w: w["w"] * w["h"])
 
 
 def capture_window(win_id, out_path):

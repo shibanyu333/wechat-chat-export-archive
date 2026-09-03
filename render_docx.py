@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """把解析出的消息渲染成仿微信排版的 .docx。"""
 import os
+from urllib.parse import quote
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches, Emu
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -40,6 +41,29 @@ def _set_w(cell, inches):
     w = OxmlElement('w:tcW')
     w.set(qn('w:w'), str(int(inches * 1440))); w.set(qn('w:type'), 'dxa')
     tcPr.append(w)
+
+
+def _add_hyperlink(paragraph, url, text, size=8, color=RGBColor(0x1A, 0x5F, 0xB4)):
+    """python-docx 没有原生超链接 API，手工塞 w:hyperlink 关系。"""
+    part = paragraph.part
+    r_id = part.relate_to(url,
+                          "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                          is_external=True)
+    link = OxmlElement('w:hyperlink')
+    link.set(qn('r:id'), r_id)
+    run = OxmlElement('w:r')
+    rPr = OxmlElement('w:rPr')
+    u = OxmlElement('w:u'); u.set(qn('w:val'), 'single'); rPr.append(u)
+    c = OxmlElement('w:color'); c.set(qn('w:val'), str(color)); rPr.append(c)
+    sz = OxmlElement('w:sz'); sz.set(qn('w:val'), str(int(size * 2))); rPr.append(sz)
+    run.append(rPr)
+    t = OxmlElement('w:t')
+    t.set(qn('xml:space'), 'preserve')
+    t.text = text
+    run.append(t)
+    link.append(run)
+    paragraph._p.append(link)
+    return link
 
 
 def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=2.0):
@@ -115,6 +139,36 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
                     ip.add_run().add_break()
                 r = ip.add_run(ln)
                 r.font.size = Pt(11); r.font.color.rgb = RGBColor(0x11, 0x11, 0x11)
+        elif m["type"] == "file":
+            # 文件卡片：仿微信的浅色方框，写清文件名/大小/真实位置
+            inner = cell.add_table(rows=1, cols=1)
+            inner.alignment = WD_TABLE_ALIGNMENT.RIGHT if me else WD_TABLE_ALIGNMENT.LEFT
+            inner.autofit = True
+            ic = inner.rows[0].cells[0]
+            _shade(ic, GREEN if me else GRAY_LIGHT)
+            ip = ic.paragraphs[0]
+            size = m.get("fsize_real") or m.get("fsize") or ""
+            nr = ip.add_run(f"📎 {m['fname']}")
+            nr.font.size = Pt(10.5); nr.bold = True
+            nr.font.color.rgb = RGBColor(0x11, 0x11, 0x11)
+            if size:
+                ip.add_run().add_break()
+                sr = ip.add_run(size)
+                sr.font.size = Pt(8); sr.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
+            for label, path in (("副本：", m.get("fcopy")), ("微信原始位置：", m.get("fpath"))):
+                if not path:
+                    continue
+                ip.add_run().add_break()
+                lr = ip.add_run(label)
+                lr.font.size = Pt(8); lr.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
+                full = path if os.path.isabs(path) else os.path.join(
+                    os.path.dirname(os.path.abspath(out_path)), path)
+                _add_hyperlink(ip, "file://" + quote(full), path)
+            if m.get("fnote"):
+                ip.add_run().add_break()
+                wr = ip.add_run("⚠️ " + m["fnote"])
+                wr.font.size = Pt(8); wr.italic = True
+                wr.font.color.rgb = RGBColor(0xB0, 0x50, 0x20)
         else:  # media
             crop = im.crop((m["x0"], m["y0"], m["x1"], m["y1"]))
             n_img += 1

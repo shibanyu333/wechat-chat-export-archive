@@ -11,6 +11,7 @@ from engine import capture_and_parse, preflight
 from wechat_ui import request_stop, clear_stop
 from render_docx import render
 from render_md import render_md
+from wxfiles import resolve_and_collect
 
 OUT_DIR = os.path.join(HERE, "导出结果")
 window = None
@@ -99,6 +100,10 @@ class Api:
         base = os.path.join(OUT_DIR, safe + "_聊天记录")
         im = self.res["im"]; scale = self.res["scale"]
         date = time.strftime("%Y-%m-%d %H:%M")
+        try:
+            n_hit, n_file = resolve_and_collect(sel, base + "_文件")
+        except Exception:
+            n_hit = n_file = 0
         outputs = []
         fl = [f.lower() for f in (formats or [])]
         try:
@@ -112,7 +117,8 @@ class Api:
         if not outputs:
             return {"ok": False, "msg": "请至少勾选一种格式"}
         return {"ok": True, "outputs": outputs, "folder": OUT_DIR,
-                "count": sum(1 for m in sel if m["type"] != "time")}
+                "count": sum(1 for m in sel if m["type"] != "time"),
+                "files": n_hit, "files_total": n_file}
 
     def reveal(self, path):
         os.system('open -R "%s"' % path)

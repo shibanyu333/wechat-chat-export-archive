@@ -34,6 +34,63 @@ def _norm(s):
     return re.sub(r'\s+', '', s or '')
 
 
+# ---- 文件卡片 ----
+# 常见办公/压缩/媒体扩展名；后面不能紧跟字母数字，避免 ".doc" 命中 ".docker"
+FILE_EXT_RE = re.compile(
+    r'\.(docx?|xlsx?|pptx?|pdf|zip|rar|7z|txt|csv|json|xmind|apk|dmg|pkg|ipa'
+    r'|numbers|pages|key|mp3|mp4|mov|avi|wav|m4a|psd|ai|svg|eps|dwg|sql'
+    r'|py|js|ts|html?|css|md|log|epub|caj|wps|et|dps|rtf|xps)(?![A-Za-z0-9])', re.I)
+# 卡片底部来源标签
+FILE_SRC_RE = re.compile(r'微信(电脑|手机|Mac|Windows|iPhone|iPad|Android)版'
+                         r'|已下载|未下载|下载中|文件已过期|已失效|接收中')
+# 大小行(OCR 常把 0 认成 O、1 认成 l)，如 "28.OK" 实为 "28.0K"
+FILE_SIZE_RE = re.compile(r'^[\d.,OoIl]{1,9}\s*(?:[KMGB]B?)$', re.I)
+_SIZE_FIX = str.maketrans({"O": "0", "o": "0", "l": "1", "I": "1"})
+
+
+def _join_wrapped(parts):
+    """把被气泡宽度折断的文件名接回去；只在英数交界处补空格。"""
+    out = ""
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if out and _ASCII_END.search(out) and _ASCII_BEGIN.search(p):
+            out += " "
+        out += p
+    return out
+
+
+def take_file_card(rows):
+    """文件卡片 = 文件名(可能折行) + 大小 + 「微信电脑版」等来源标签。
+
+    必须同时出现【扩展名】和【大小或来源标签】才认定，这样正文里随口写的
+    "我发你的 xx.docx" 不会被误判成文件卡片。返回 {"name","size"} 或 None。"""
+    texts = [r["text"] for r in rows]
+    hit = next(((i, m) for i, t in enumerate(texts)
+                for m in [FILE_EXT_RE.search(t)] if m), None)
+    if hit is None:
+        return None
+    i = hit[0]
+    tail = texts[i + 1:]
+    size = ""
+    for t in tail:
+        s = re.sub(r'\s+', '', t)
+        if FILE_SIZE_RE.match(s):
+            size = s.translate(_SIZE_FIX).upper()
+            break
+    if not size and not any(FILE_SRC_RE.search(t) for t in tail):
+        return None
+    name = _join_wrapped(texts[:i + 1])
+    # 取最后一个扩展名并截断，甩掉图标字母("...docx W")和粘在同行的大小
+    last = None
+    for m in FILE_EXT_RE.finditer(name):
+        last = m
+    if last:
+        name = name[:last.end()]
+    return {"name": name.strip(), "size": size}
+
+
 def take_voice_duration(rows):
     """气泡首/次行若是纯时长标记(可带"转文字"等按钮文字)，剥掉并返回时长；否则 None。"""
     for i in range(min(2, len(rows))):
@@ -65,13 +122,21 @@ def close_h(mask, hx=41, vy=9):
 
 
 def bubbles_from(mask, sender, min_area_px, min_w, min_h):
+    """连通块 → 气泡外接框。
+
+    逐个标签做 np.where(lab == i) 会为每个连通块重扫整张图：长会话的长图有
+    两千万像素、上百个连通块，实测这一个函数就占掉整次解析 60 秒里的 42 秒。
+    find_objects 一趟给出全部外接框，bincount 一趟给出全部面积。"""
     lab, n = ndimage.label(mask)
+    if n == 0:
+        return []
+    areas = np.bincount(lab.ravel(), minlength=n + 1)
     res = []
-    for i in range(1, n + 1):
-        ys, xs = np.where(lab == i)
-        if len(ys) < min_area_px:
+    for i, sl in enumerate(ndimage.find_objects(lab), start=1):
+        if sl is None or areas[i] < min_area_px:
             continue
-        y0, y1, x0, x1 = ys.min(), ys.max(), xs.min(), xs.max()
+        y0, y1 = sl[0].start, sl[0].stop - 1
+        x0, x1 = sl[1].start, sl[1].stop - 1
         if (x1 - x0) < min_w or (y1 - y0) < min_h:
             continue
         res.append({"sender": sender, "x0": int(x0), "x1": int(x1),
@@ -194,6 +259,14 @@ def parse_image(path, scale=2.0):
     for b in bubbles:
         rows = group_rows(text_in(b["x0"], b["y0"], b["x1"], b["y1"]))
         dur = take_voice_duration(rows)
+        card = take_file_card(rows) if dur is None else None
+        if card:
+            text_msgs.append({"type": "file", "sender": b["sender"],
+                              "fname": card["name"], "fsize": card["size"],
+                              "text": card["name"],
+                              "y0": b["y0"], "y1": b["y1"],
+                              "x0": b["x0"], "x1": b["x1"]})
+            continue
         text = "\n".join(merge_wrapped(rows, b["x1"])).strip()
         text_msgs.append({"type": "text", "sender": b["sender"], "text": text,
                           "voice": dur is not None, "dur": dur or "",
@@ -210,11 +283,14 @@ def parse_image(path, scale=2.0):
     media_mask = ndimage.binary_closing(media_mask, structure=np.ones((5, 5)))
     lab, n = ndimage.label(media_mask)
     media_msgs = []
-    for i in range(1, n + 1):
-        ys, xs = np.where(lab == i)
-        y0, y1, x0, x1 = ys.min(), ys.max(), xs.min(), xs.max()
+    m_areas = np.bincount(lab.ravel(), minlength=n + 1) if n else np.zeros(1, int)
+    for i, sl in enumerate(ndimage.find_objects(lab) if n else [], start=1):
+        if sl is None:
+            continue
+        y0, y1 = sl[0].start, sl[0].stop - 1
+        x0, x1 = sl[1].start, sl[1].stop - 1
         w, h = x1 - x0, y1 - y0
-        area = len(ys)
+        area = m_areas[i]
         if area < 6000 or w < 70 or h < 70:   # 过滤小碎块(头像残留/图标)
             continue
         # 头像本身也会成块(~74x74)，靠尺寸区分：媒体通常更大或在中部
@@ -226,6 +302,9 @@ def parse_image(path, scale=2.0):
     # 的抗锯齿像素会被误检成"对方"气泡，如时间戳、"已建群"、撤回提示)
     cleaned = []
     for m in text_msgs:
+        if m["type"] == "file":      # 文件卡片不参与"居中=系统消息"重分类
+            cleaned.append(m)
+            continue
         t = re.sub(r'[＆&]?\s*\d+\s*条新消息', '', m.get("text", "")).strip()
         if not t and not m.get("voice"):
             continue
@@ -245,12 +324,25 @@ def parse_image(path, scale=2.0):
         cleaned.append(m)
     text_msgs = cleaned
 
+    # 剔除"假气泡"：群聊里每条消息上方的昵称标签、图片里的文字，它们的抗锯齿灰度
+    # 正好落在灰气泡的色区里，会被连通域当成气泡。真气泡有内边距，单行也有固定
+    # 高度(实测 73px@2x)，这些假货则很扁(实测 h=24~40)。阈值取本次所有文本气泡
+    # 高度的中位数比例，与缩放、主题无关。
+    # 只按高度判，不能顺带按宽度判：连通域经常把左边的头像和气泡粘成一块
+    # (实测 x=20~1853、w=1833 的真消息)，按宽度删会把真消息整条删掉。
+    th = sorted(m["y1"] - m["y0"] for m in text_msgs if m["type"] == "text")
+    if th:
+        min_h = th[len(th) // 2] * 0.6
+        text_msgs = [m for m in text_msgs
+                     if m["type"] != "text" or m.get("voice")
+                     or (m["y1"] - m["y0"]) >= min_h]
+
     # 媒体块若与某文本气泡高度重叠(说明是同一气泡的误检)，丢弃媒体
     def overlap(m, b):
         lo, hi = max(m["y0"], b["y0"]), min(m["y1"], b["y1"])
         return max(0, hi - lo)
     media_kept = []
-    text_boxes = [m for m in text_msgs if m["type"] == "text"]
+    text_boxes = [m for m in text_msgs if m["type"] in ("text", "file")]
     for m in media_msgs:
         mh = m["y1"] - m["y0"]
         if any(overlap(m, b) > 0.6 * mh for b in text_boxes):
@@ -262,7 +354,28 @@ def parse_image(path, scale=2.0):
     find_sender_names(text_boxes + media_msgs, ocr_lines, set(used_line_ids),
                       text_boxes + media_msgs)
 
-    msgs = text_msgs + times + media_msgs
+    # 居中、又不属于任何气泡/媒体/时间戳的 OCR 行 = 系统提示("XX 邀请你加入了群聊"、
+    # "XX 撤回了一条消息"、"已建群")。这些字是直接画在背景上的，没有气泡底色，
+    # 连通域一个也抓不到，必须从 OCR 行里单独捡回来，否则建群、撤回整条丢失。
+    boxes = [(m["y0"], m["y1"], m["x0"], m["x1"])
+             for m in text_msgs + media_msgs if "x0" in m]
+    sys_msgs = []
+    for idx, l in enumerate(ocr_lines):
+        if idx in used_line_ids:
+            continue
+        cx, cy = l["x"] + l["w"] / 2, l["y"] + l["h"] / 2
+        if abs(cx - W / 2) > W * 0.12 or l["w"] > W * 0.72:
+            continue
+        if any(y0 - 6 <= cy <= y1 + 6 and x0 - 8 <= cx <= x1 + 8
+               for y0, y1, x0, x1 in boxes):
+            continue
+        t = l["text"].strip()
+        if not t or NOISE_RE.match(_norm(t)) or TIME_FULL_RE.match(_norm(t)):
+            continue
+        sys_msgs.append({"type": "system", "text": t,
+                         "y0": int(l["y"]), "y1": int(l["y"] + l["h"])})
+
+    msgs = text_msgs + times + media_msgs + sys_msgs
     msgs.sort(key=lambda m: m["y0"])
 
     # 相邻重复去重：同一时间分隔符连续出现(OCR 双检/拼接缝)只留一个；
@@ -270,8 +383,8 @@ def parse_image(path, scale=2.0):
     out = []
     for m in msgs:
         p = out[-1] if out else None
-        if p and m["type"] == "time" and p["type"] == "time" \
-                and _norm(p["text"]) == _norm(m["text"]):
+        if (p and m["type"] in ("time", "system") and p["type"] == m["type"]
+                and _norm(p["text"]) == _norm(m["text"])):
             continue
         if (p and m["type"] == "text" and p["type"] == "text"
                 and p.get("sender") == m.get("sender") and not m.get("voice")
@@ -298,6 +411,8 @@ if __name__ == "__main__":
     print(f"共 {len(msgs)} 条:")
     for m in msgs:
         t = (m.get("text") or "").replace("\n", "⏎")[:50]
+        if m["type"] == "file":
+            t = f"📎 {m['fname']} ({m['fsize']})"
         xr = f" x[{m.get('x0','?')}-{m.get('x1','?')}]" if m["type"] not in ("time", "system") else ""
         v = f" 🎤{m['dur']}" if m.get("voice") else ""
         nm = f" @{m['name']}" if m.get("name") else ""

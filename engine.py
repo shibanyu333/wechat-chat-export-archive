@@ -4,7 +4,7 @@
 import os, sys, time, subprocess
 from PIL import Image
 from wechat_ui import (WeChatView, ensure_front, frontmost_name, match_shift,
-                       check_stop, StopRequested, TMP_DIR)
+                       check_stop, StopRequested, FocusLost, TMP_DIR)
 from geometry import capture_window
 from ocr import ocr_image
 from parse3 import parse_image
@@ -48,8 +48,65 @@ def detect_title(v):
     lines = [l for l in lines if l["text"].strip()]
     if not lines:
         return None
-    lines.sort(key=lambda l: -l["w"])
-    return lines[0]["text"].strip()
+    # 会话名是这块区域里最靠上、最靠左的那行。不能按"最宽"挑：顶栏下沿如果正好
+    # 露出一条居中的系统消息("Michael 撤回了一条消息")，它比会话名更宽，实测会
+    # 被当成会话名写进文件名。
+    lines.sort(key=lambda l: l["y"])
+    band = [l for l in lines if l["y"] - lines[0]["y"] < 20 * s]
+    band.sort(key=lambda l: l["x"])
+    return band[0]["text"].strip()
+
+
+def scroll_to_top(v, max_steps=400, progress=print):
+    """向上滚到会话最开头。微信按块加载历史，滚到已加载块的顶部会先"卡住"，
+    等一会儿新块加载完又能继续，所以连续多轮画面不动才算真到顶。"""
+    _, prev = v.grab()
+    H = prev.shape[0]
+    still = 0
+    steps = 3                          # 同 stitch_down：上限 4，超过就对不上位
+    for i in range(max_steps):
+        check_stop()
+        v.scroll(3, steps=steps)       # 正数=向上(更早的消息)
+        _, gray = v.grab()
+        d, score = match_shift(prev, gray)     # 内容向下移动了多少
+        if score >= 0.5 and d >= 8:
+            frac = d / max(H, 1)
+            if frac < 0.40:
+                steps = min(4, steps + 1)
+            elif frac > 0.68:
+                steps = max(1, steps - 1)
+        if score >= 0.5 and d < 8:
+            steps = 3
+            still += 1
+            if still >= 8:
+                # 别急着收：微信到达已加载块的顶部后要去拉更早的历史，慢的时候
+                # 能停十几秒。多等一次再试两下，两下都不动才算真的到开头，
+                # 否则会把"正在加载"当成"没有更早的消息"，导出少一大截。
+                time.sleep(2.5)
+                moved = False
+                for _ in range(2):
+                    check_stop()
+                    v.scroll(3, steps=3)
+                    _, g2 = v.grab()
+                    d2, s2 = match_shift(prev, g2)
+                    prev = g2
+                    if not (s2 >= 0.5 and d2 < 8):
+                        moved = True
+                        break
+                if not moved:
+                    progress(f"  · 已到会话开头(第 {i+1} 轮)")
+                    return i + 1
+                still = 0
+                steps = 3
+                continue
+            time.sleep(0.9)            # 给分块加载留时间
+        else:
+            still = 0
+            if i % 10 == 0:
+                progress(f"  ...向上翻 {i} 屏")
+        prev = gray
+    progress(f"  ! 翻了 {max_steps} 屏仍未到顶，从这里开始抓")
+    return max_steps
 
 
 def stitch_down(v, max_steps=500, progress=print, on_frame=None):
@@ -74,9 +131,17 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None):
     seek = 0      # 视图跳到上方后向下追赶的轮数(反向匹配成功)
     lost = 0      # 与上次拼接位置完全对不上的轮数(双向都低分)
     rebases = 0   # 放弃对位、直接续接的次数
+    # 每轮滚多少格滚轮。实测标定(帧高 1129px)：
+    #   steps=1→180px  2→360px  3→540px  4→720px 分数都是 1.000
+    #   steps=6→712px 分数 0.238   steps=8→800px 分数 0.155
+    # 也就是说超过 4 格之后位移不再增加、画面却对不上了(滚太急，截到了动画中间帧)，
+    # 所以上限锁死在 4。以前这里硬编码从 6 起步，等于每次都从"对不上"开始，
+    # 实测导致整段只抓到一屏就误判到底。
+    steps = 3
+    stall_confirm = 0
     for i in range(max_steps):
         check_stop()
-        v.scroll(-3)                       # 向下(朝最新消息)
+        v.scroll(-3, steps=steps)          # 向下(朝最新消息)
         rgb, gray = v.grab()
         if on_frame is not None and on_frame(v):
             rgb, gray = v.grab()
@@ -84,6 +149,12 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None):
         d, score = match_shift(gray, prev_gray)
         if score >= SCORE_OK and d >= 8:
             still = seek = lost = 0
+            stall_confirm = 0
+            frac = d / max(H, 1)
+            if frac < 0.40:
+                steps = min(4, steps + 1)      # 翻得太保守，加大步长
+            elif frac > 0.68:
+                steps = max(1, steps - 1)      # 重叠不够了，收一点
             d = min(d, H)
             new_bottom = rgb.crop((0, rgb.height - d, rgb.width, rgb.height))
             merged = Image.new("RGB", (canvas.width, canvas.height + d))
@@ -96,8 +167,16 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None):
         if score >= SCORE_OK:
             # 高分停滞：真到底，或分块加载中的假底部(随后跳块会落到下面的分支)
             seek = lost = 0
+            steps = 3
             still += 1
             if still >= 6:
+                # 别急着收尾：滚不动也可能是分块加载卡住、或滚轮事件被吞了。
+                # 多等一会再确认两轮，真不动才算到底，宁可多花几秒也不半截收工。
+                if stall_confirm < 2:
+                    stall_confirm += 1
+                    still = 0
+                    time.sleep(1.6)
+                    continue
                 break
             time.sleep(0.7)
             continue
@@ -111,11 +190,17 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None):
             if seek < 40:
                 continue
         else:
-            # 双向都对不上：跳变后微信重排了版面或落点跳过了原屏
+            # 双向都对不上：跳变后微信重排了版面，或者落点直接跳过了原来那一屏。
             lost += 1
             if lost == 1 and seek == 0:
                 progress("  · 微信视图自动跳动(历史分块加载)，尝试重新对位...")
             if lost < 10:
+                # 关键：跳变可能把视图甩到拼接位置的【下方】——中间那段被跳过了。
+                # 这时继续闷头往下滚永远追不回来，那段内容就永久丢失(实测两处接缝
+                # 各吃掉一条消息)。所以往回滚一屏，把重叠区找回来再对位。
+                v.scroll(3, steps=3)
+                time.sleep(0.8)
+                steps = 2          # 重新对上之前小步走，别再跨过去
                 continue
         # 追不上/对不上：放弃精确对位，从当前位置直接续接。
         # 画一条背景色分隔带作接缝标记；宁可少量重复或缺失，也不整段丢弃
@@ -130,11 +215,13 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None):
         canvas = merged
         prev_gray = gray
         still = seek = lost = 0
-        time.sleep(1.2)   # 续接后让微信把分块加载/重排安顿下来，避免连环跳变
+        steps = 2         # 续接后小步起步，降低再次跨过去的概率
+        time.sleep(1.8)   # 让微信把分块加载/重排安顿下来，避免连环跳变
     return canvas
 
 
-def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_out=None):
+def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_out=None,
+                      from_top=False):
     ok, msg = preflight()
     if not ok:
         raise RuntimeError(msg)
@@ -148,6 +235,10 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     # 回到起点上方，再干净地向下拼图。绝不能边滚边转——转写文字在气泡下方、常已滚出当前帧。
     n_voice = 0
     try:
+        if from_top:
+            progress("· 先向上滚到会话开头(请勿操作鼠标键盘；急停 ⌃⌥⌘+.)...")
+            scroll_to_top(v, max_steps, progress=progress)
+            time.sleep(1.8); v.refresh_geometry()
         if do_voice:
             from voice import transcribe_down
             progress("· 语音自动转文字：从当前位置向下逐屏转写(较慢；急停 ⌃⌥⌘+.)...")
@@ -160,9 +251,10 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
             # 大幅回滚后微信的历史分块还在加载，立即下滚会触发重新锚定跳变；多等一会
             time.sleep(1.8); v.refresh_geometry()
 
+        v.calibrate_bottom(progress=progress)
         progress("· 从当前顶部位置向下抓取到最新(请勿操作鼠标键盘；急停 ⌃⌥⌘+.)...")
         canvas = stitch_down(v, max_steps, progress=progress)
-    except StopRequested as e:
+    except (StopRequested, FocusLost) as e:
         raise RuntimeError(str(e))
     stitched_path = stitched_out or os.path.join(TMP_DIR, "stitched_full.png")
     canvas.save(stitched_path)
