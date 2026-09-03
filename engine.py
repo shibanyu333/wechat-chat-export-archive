@@ -71,9 +71,9 @@ def scroll_to_top(v, max_steps=400, progress=print):
         d, score = match_shift(prev, gray)     # 内容向下移动了多少
         if score >= 0.5 and d >= 8:
             frac = d / max(H, 1)
-            if frac < 0.40:
+            if score >= 0.85 and frac < 0.55:
                 steps = min(4, steps + 1)
-            elif frac > 0.68:
+            elif score < 0.70 or frac > 0.68:
                 steps = max(1, steps - 1)
         if score >= 0.5 and d < 8:
             steps = 3
@@ -151,10 +151,14 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None):
             still = seek = lost = 0
             stall_confirm = 0
             frac = d / max(H, 1)
-            if frac < 0.40:
-                steps = min(4, steps + 1)      # 翻得太保守，加大步长
-            elif frac > 0.68:
-                steps = max(1, steps - 1)      # 重叠不够了，收一点
+            # 按「实际位移 + 匹配质量」双指标调步长：分数高说明帧间对位很稳，
+            # 可以多滚一点少跑几轮；分数一掉就立刻收——对不上位要走跳变恢复，
+            # 既慢又可能在接缝处丢消息。实测 steps=4 时最低分 0.678，余量偏薄，
+            # 所以只在分数足够漂亮时才放到 4。
+            if score >= 0.85 and frac < 0.55:
+                steps = min(4, steps + 1)
+            elif score < 0.70 or frac > 0.68:
+                steps = max(1, steps - 1)
             d = min(d, H)
             new_bottom = rgb.crop((0, rgb.height - d, rgb.width, rgb.height))
             merged = Image.new("RGB", (canvas.width, canvas.height + d))
@@ -222,6 +226,13 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None):
 
 def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_out=None,
                       from_top=False):
+    # 每行进度带上已用秒数，人工操作时一眼看出慢在哪一步(滚动/OCR/渲染)
+    _t0 = time.time()
+    _raw = progress
+
+    def progress(m):
+        _raw(f"[{time.time() - _t0:5.1f}s] {m}")
+
     ok, msg = preflight()
     if not ok:
         raise RuntimeError(msg)

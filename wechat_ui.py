@@ -120,6 +120,32 @@ def scroll_lines(gx, gy, lines, steps=3, settle=0.32):
     time.sleep(settle)
 
 
+def capture_window_rgb(win_id):
+    """直接向 CoreGraphics 要窗口位图，返回 (H, W, 3) 的 RGB 数组；失败返回 None。
+
+    原来每抓一帧都要 fork 一个 screencapture 进程、把 2480x1660 编码成 PNG 落盘、
+    再让 PIL 解码回来——实测 112ms/帧。抓一段长会话要滚几十上百帧，这是整个导出
+    最大的一笔开销。直接问 CoreGraphics 要位图是 18ms(实测 6.2x)，而且像素与
+    screencapture 逐通道完全一致(BGRA 取 [2,1,0] 得 RGB，平均通道差 0.00)。
+    kCGWindowImageBoundsIgnoreFraming 对应 screencapture 的 -o(去窗口阴影)，
+    kCGWindowImageBestResolution 保证拿到 Retina 2x 原分辨率。"""
+    img = Quartz.CGWindowListCreateImage(
+        Quartz.CGRectNull, Quartz.kCGWindowListOptionIncludingWindow, win_id,
+        Quartz.kCGWindowImageBoundsIgnoreFraming | Quartz.kCGWindowImageBestResolution)
+    if img is None:
+        return None
+    h = Quartz.CGImageGetHeight(img)
+    w = Quartz.CGImageGetWidth(img)
+    bpr = Quartz.CGImageGetBytesPerRow(img)
+    if not h or not w or bpr < w * 4:
+        return None
+    data = Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img))
+    buf = np.frombuffer(data, dtype=np.uint8)
+    if buf.size < h * bpr:
+        return None
+    return buf[:h * bpr].reshape(h, bpr // 4, 4)[:, :w, 2::-1]   # BGRA → RGB
+
+
 class WeChatView:
     def __init__(self):
         self.pid = wechat_pid()
@@ -134,20 +160,33 @@ class WeChatView:
         self.pane_cx = self.win["x"] + (self.reg["pane_x_px"] + self.reg["W"]) / 2 / s
         self.pane_cy = self.win["y"] + (self.reg["top_px"] + self.reg["bottom_px"]) / 2 / s
 
+    def _full_rgb(self):
+        """整窗 RGB 数组。CoreGraphics 偶发返回空(窗口刚切换空间等)时退回截图命令。"""
+        a = capture_window_rgb(self.win["id"])
+        if a is None:
+            capture_window(self.win["id"], _TMP)
+            a = np.asarray(Image.open(_TMP).convert("RGB"))
+        return a
+
     def grab(self):
-        capture_window(self.win["id"], _TMP)
-        im = Image.open(_TMP)
-        crop = im.crop((self.reg["pane_x_px"], self.reg["top_px"], self.reg["W"], self.reg["bottom_px"]))
-        rgb = crop.convert("RGB")
-        gray = np.asarray(crop.convert("L"), dtype=np.float32)
+        r = self.reg
+        a = self._full_rgb()
+        crop = np.ascontiguousarray(
+            a[r["top_px"]:r["bottom_px"], r["pane_x_px"]:r["W"]])
+        rgb = Image.fromarray(crop)
+        # 灰度直接用 numpy 算(ITU-R 601 权重，与 PIL convert("L") 等价)，
+        # 省掉一次 PIL 转换
+        gray = (crop[:, :, 0] * 0.299 + crop[:, :, 1] * 0.587
+                + crop[:, :, 2] * 0.114).astype(np.float32)
         return rgb, gray
 
     def scroll(self, lines, steps=3, settle=0.32):
         scroll_lines(self.pane_cx, self.pane_cy, lines, steps, settle)
 
     def _full_gray(self):
-        capture_window(self.win["id"], _TMP)
-        return np.asarray(Image.open(_TMP).convert("L"), dtype=np.float32)
+        a = self._full_rgb()
+        return (a[:, :, 0] * 0.299 + a[:, :, 1] * 0.587
+                + a[:, :, 2] * 0.114).astype(np.float32)
 
     def _moved_rows(self, a, b, pad=6):
         """两帧之间发生变化的行范围(只看聊天列)。"""

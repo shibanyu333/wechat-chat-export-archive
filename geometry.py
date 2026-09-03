@@ -93,6 +93,13 @@ def detect_regions(png_path, win):
         y -= 1
     bottom = y
 
+    # 兜底：消息区不可能只占窗口的一小条。实测抓在微信重绘中间的帧上时，
+    # 逐行方差会把输入框上方的空白带算错，返回过 702px(正常 1197px)的高度；
+    # 几何只在开抓时测一次，一旦测歪，整段抓取都会按错的下边界裁，内容直接丢。
+    # 所以低于窗口一半就不信它，退回"窗口高 - 底部工具栏 - 一屏典型输入框"。
+    if bottom - top < H * 0.45:
+        bottom = max(top + int(H * 0.45), H - int(150 * scale))
+
     return {
         "scale": scale,
         "pane_x_px": pane_x,

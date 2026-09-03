@@ -12,14 +12,21 @@ from wechat_ui import request_stop, clear_stop
 from render_docx import render
 from render_md import render_md
 from wxfiles import resolve_and_collect
+from paths import make_export_dir, layout, OUT_ROOT
 
-OUT_DIR = os.path.join(HERE, "导出结果")
+OUT_DIR = OUT_ROOT
 window = None
 
 
 class Api:
     def __init__(self):
         self.res = None
+
+    def _log(self, m):
+        try:
+            window.evaluate_js("window.addLog(%s)" % json.dumps(str(m)))
+        except Exception:
+            pass
 
     def check_env(self):
         ok, msg = preflight()
@@ -30,7 +37,7 @@ class Api:
         request_stop()
         return True
 
-    def capture(self, max_steps, do_voice):
+    def capture(self, max_steps, do_voice, from_top=False):
         def prog(m):
             try:
                 window.evaluate_js("window.addLog(%s)" % json.dumps(str(m)))
@@ -42,7 +49,8 @@ class Api:
         except Exception:
             pass
         try:
-            res = capture_and_parse(int(max_steps), bool(do_voice), progress=prog)
+            res = capture_and_parse(int(max_steps), bool(do_voice), progress=prog,
+                                    from_top=bool(from_top))
         except Exception as e:
             self._to_front()
             return {"ok": False, "msg": str(e)}
@@ -78,7 +86,7 @@ class Api:
         except Exception:
             pass
 
-    def export(self, start_i, end_i, formats, name):
+    def export(self, start_i, end_i, formats, name, want_files=True):
         if not self.res:
             return {"ok": False, "msg": "还没有抓取会话"}
         msgs = self.res["msgs"]
@@ -94,39 +102,50 @@ class Api:
             sel = sel[:-1]
         if not sel:
             return {"ok": False, "msg": "选区为空"}
+        fl = [f.lower() for f in (formats or [])]
+        if not fl:
+            return {"ok": False, "msg": "请至少勾选一种格式"}
         title = (name or "").strip() or self.res["title"]
-        safe = "".join(c for c in title if c not in '/\\:*?"<>|').strip()[:40] or "微信会话"
-        os.makedirs(OUT_DIR, exist_ok=True)
-        base = os.path.join(OUT_DIR, safe + "_聊天记录")
         im = self.res["im"]; scale = self.res["scale"]
         date = time.strftime("%Y-%m-%d %H:%M")
-        try:
-            n_hit, n_file = resolve_and_collect(sel, base + "_文件")
-        except Exception:
-            n_hit = n_file = 0
+        # 本次导出独占一个文件夹：文档、图片、文件都放进去，整个夹子可直接归档转发
+        d = make_export_dir(title)
+        lay = layout(d)
+        n_hit = n_file = 0
+        missing = []
+        if want_files:
+            try:
+                n_hit, n_file = resolve_and_collect(sel, lay["files"])
+                missing = [m.get("fname", "") for m in sel
+                           if m.get("type") == "file" and not m.get("fpath")]
+            except Exception as e:
+                self._log("文件收集出错(不影响文档): %s" % e)
         outputs = []
-        fl = [f.lower() for f in (formats or [])]
         try:
             if "docx" in fl:
-                o, _ = render(im, sel, title, base + ".docx", scale=scale); outputs.append(o)
+                o, _ = render(im, sel, title, lay["docx"], media_dir=lay["images"],
+                              scale=scale); outputs.append(o)
             if "md" in fl:
-                o, _ = render_md(im, sel, title, base + ".md", scale=scale,
-                                 export_date=date); outputs.append(o)
+                o, _ = render_md(im, sel, title, lay["md"], media_dir=lay["images"],
+                                 scale=scale, export_date=date); outputs.append(o)
         except Exception as e:
             return {"ok": False, "msg": "导出失败: " + str(e)}
-        if not outputs:
-            return {"ok": False, "msg": "请至少勾选一种格式"}
-        return {"ok": True, "outputs": outputs, "folder": OUT_DIR,
+        n_img = len(os.listdir(lay["images"])) if os.path.isdir(lay["images"]) else 0
+        return {"ok": True, "outputs": [os.path.basename(o) for o in outputs],
+                "folder": d, "folder_name": os.path.basename(d),
                 "count": sum(1 for m in sel if m["type"] != "time"),
-                "files": n_hit, "files_total": n_file}
+                "images": n_img, "files": n_hit, "files_total": n_file,
+                "missing": missing[:8]}
 
     def reveal(self, path):
         os.system('open -R "%s"' % path)
         return True
 
-    def open_folder(self):
-        os.makedirs(OUT_DIR, exist_ok=True)
-        os.system('open "%s"' % OUT_DIR)
+    def open_folder(self, path=None):
+        """不传就打开「导出结果」总目录，传了就打开本次导出的那个文件夹。"""
+        d = path or OUT_DIR
+        os.makedirs(d, exist_ok=True)
+        os.system('open "%s"' % d)
         return True
 
 
@@ -135,7 +154,7 @@ def main():
     api = Api()
     html = os.path.join(HERE, "ui", "index.html")
     window = webview.create_window("微信聊天记录导出", url=html, js_api=api,
-                                   width=580, height=860, min_size=(480, 640))
+                                   width=620, height=880, min_size=(520, 640))
     webview.start()
 
 

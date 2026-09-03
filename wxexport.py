@@ -11,8 +11,7 @@ from engine import capture_and_parse
 from render_docx import render
 from render_md import render_md
 from wxfiles import resolve_and_collect
-
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "导出结果")
+from paths import make_export_dir, layout
 
 
 def main():
@@ -23,7 +22,7 @@ def main():
     ap.add_argument("--from-top", action="store_true",
                     help="先自动滚到会话最开头，导出整段聊天记录")
     ap.add_argument("--voice", action="store_true", help="语音自动转文字(实验,较慢)")
-    ap.add_argument("--out", help="输出路径(不含扩展名，默认存到 导出结果/)")
+    ap.add_argument("--out", help="指定导出文件夹(默认 导出结果/会话名_月日-时分/)")
     ap.add_argument("--keep-image", action="store_true", help="保留拼接长图")
     ap.add_argument("--from-image", help="不抓取，直接重新解析已有的拼接长图(改了解析规则后重出文档用)")
     ap.add_argument("--no-copy-files", action="store_true",
@@ -59,29 +58,30 @@ def _finish(args, res):
     im, msgs, scale = res["im"], res["msgs"], res["scale"]
     title = args.name or res["title"]
     n_msg = sum(1 for m in msgs if m["type"] != "time")
-    safe = "".join(c for c in title if c not in '/\\:*?"<>|').strip()[:40] or "微信会话"
     if args.out:
-        base = os.path.abspath(args.out)
+        d = os.path.abspath(args.out); os.makedirs(d, exist_ok=True)
     else:
-        os.makedirs(OUT_DIR, exist_ok=True)
-        base = os.path.join(OUT_DIR, f"{safe}_聊天记录")
+        d = make_export_dir(title)
+    lay = layout(d)
     fmts = [f.strip().lower() for f in args.format.split(",") if f.strip()]
     date = time.strftime("%Y-%m-%d %H:%M")
 
-    # 聊天里的文件：微信把它们明文存在本地，按文件名找回来并复制到导出目录旁
+    # 聊天里的文件：微信把它们明文存在本地，按文件名找回来，一并放进本次导出文件夹
     n_hit, n_file = resolve_and_collect(
-        msgs, None if args.no_copy_files else base + "_文件", progress=print)
+        msgs, None if args.no_copy_files else lay["files"], progress=print)
 
     outputs = []
     if "docx" in fmts:
-        o, _ = render(im, msgs, title, base + ".docx", scale=scale); outputs.append(o)
+        o, _ = render(im, msgs, title, lay["docx"], media_dir=lay["images"],
+                      scale=scale); outputs.append(o)
     if "md" in fmts or "markdown" in fmts:
-        o, _ = render_md(im, msgs, title, base + ".md", scale=scale,
-                         export_date=date); outputs.append(o)
+        o, _ = render_md(im, msgs, title, lay["md"], media_dir=lay["images"],
+                         scale=scale, export_date=date); outputs.append(o)
 
-    print(f"\n✓ 导出完成 ({n_msg} 条消息" + (f"，{n_hit}/{n_file} 个文件已定位" if n_file else "") + "):")
+    print(f"\n✓ 导出完成 ({n_msg} 条消息" + (f"，{n_hit}/{n_file} 个文件已定位" if n_file else "") + ")")
+    print("  导出文件夹:", d)
     for o in outputs:
-        print("  ·", o)
+        print("    ·", os.path.basename(o))
 
     sp = res.get("stitched_path")
     if args.from_image:
@@ -91,7 +91,7 @@ def _finish(args, res):
     elif sp and os.path.exists(sp):
         os.remove(sp)
     if outputs:
-        os.system(f'open -R "{outputs[0]}"')
+        os.system(f'open "{d}"')
 
 
 if __name__ == "__main__":

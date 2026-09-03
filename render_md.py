@@ -38,7 +38,7 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
             size = m.get("fsize_real") or m.get("fsize") or ""
             lines.append(f"**{who}：** 📎 **{m['fname']}**" + (f"（{size}）" if size else ""))
             if m.get("fcopy"):
-                lines.append(f"> 已复制到：[`{m['fcopy']}`]({m['fcopy'].replace(' ', '%20')})")
+                lines.append(f"> 已复制到：[`{m['fcopy']}`](<{m['fcopy']}>)")
             if m.get("fpath"):
                 lines.append(f"> 微信原始位置：`{m['fpath']}`")
             if m.get("fnote"):
@@ -48,10 +48,9 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
             n_img += 1
             fn = f"img_{n_img:03d}.png"
             crop.save(os.path.join(media_dir, fn))
-            # 会话名常带空格(如"建站6132 （3）")，链接里的空格必须转义，
-            # 否则标准 Markdown 渲染器会把路径截断，图片全裂
-            rel = f"{media_name}/{fn}".replace(" ", "%20")
-            lines.append(f"**{who}：** ![图片]({rel})")
+            # 路径用尖括号包起来：文件名里的空格和括号(如"产品分类(2).txt")
+            # 直接写进 () 会让 Markdown 提前闭合链接，图片和附件全点不开
+            lines.append(f"**{who}：** ![图片](<{media_name}/{fn}>)")
         lines.append("")
 
     with open(out_path, "w", encoding="utf-8") as f:
