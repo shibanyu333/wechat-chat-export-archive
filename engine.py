@@ -57,6 +57,37 @@ def detect_title(v):
     return band[0]["text"].strip()
 
 
+def bottom_fingerprint(v, progress=print, max_rounds=60):
+    """开抓前给「会话最新一屏」拍个指纹，供后面判断是不是真的抓到底了。
+
+    微信按块加载历史，向下抓的途中会遇到「假底部」：画面卡住不动，等一会儿
+    才把下一块加载出来。靠「连续多少轮没动」来判到底，本质是在赌等待时长——
+    每轮变快之后实际等待秒数就跟着缩水，实测同一个会话因此少抓了 43 条
+    (159 → 116，结尾停在昨天 15:36 而不是最新)。
+    有了这张指纹就不用赌：画面和它对上才是真到底，对不上就继续等。
+    先向下滚到会话末尾再拍——用户可能停在历史中间(比如从搜索结果跳进来的)。
+    往「更新」的方向不存在分块加载(最新的消息本来就在内存里)，所以停住 2.5 秒
+    还不动就可以认定是真末尾，不用像向上翻历史那样苦等。
+    实在确认不了就返回 None，退回按时长兜底(结果一样完整，只是结尾要多等 40 秒)。"""
+    _, g = v.grab()
+    for i in range(max_rounds):
+        check_stop()
+        _, g2 = v.scroll_settled(-3, steps=4, before=g)
+        d, score = match_shift(g2, g)
+        g = g2
+        if score >= 0.5 and d < 8:
+            time.sleep(2.5)
+            _, g3 = v.scroll_settled(-3, steps=4, before=g)
+            d2, s2 = match_shift(g3, g)
+            if s2 >= 0.5 and d2 < 8:
+                progress(f"  · 已到会话末尾并记下指纹(下滚 {i + 1} 屏)，"
+                         "抓到这里就收工")
+                return g3
+            g = g3
+    progress("  · 没能确认会话末尾，改用等待时长判断到底(结尾会多等一会)")
+    return None
+
+
 def scroll_to_top(v, max_steps=400, progress=print):
     """向上滚到会话最开头。微信按块加载历史，滚到已加载块的顶部会先"卡住"，
     等一会儿新块加载完又能继续，所以连续多轮画面不动才算真到顶。"""
@@ -66,8 +97,7 @@ def scroll_to_top(v, max_steps=400, progress=print):
     steps = 3                          # 同 stitch_down：上限 4，超过就对不上位
     for i in range(max_steps):
         check_stop()
-        v.scroll(3, steps=steps)       # 正数=向上(更早的消息)
-        _, gray = v.grab()
+        _, gray = v.scroll_settled(3, steps=steps, before=prev)  # 正数=向上
         d, score = match_shift(prev, gray)     # 内容向下移动了多少
         if score >= 0.5 and d >= 8:
             frac = d / max(H, 1)
@@ -86,8 +116,7 @@ def scroll_to_top(v, max_steps=400, progress=print):
                 moved = False
                 for _ in range(2):
                     check_stop()
-                    v.scroll(3, steps=3)
-                    _, g2 = v.grab()
+                    _, g2 = v.scroll_settled(3, steps=3, before=prev)
                     d2, s2 = match_shift(prev, g2)
                     prev = g2
                     if not (s2 >= 0.5 and d2 < 8):
@@ -109,7 +138,7 @@ def scroll_to_top(v, max_steps=400, progress=print):
     return max_steps
 
 
-def stitch_down(v, max_steps=500, progress=print, on_frame=None):
+def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None):
     """从当前位置向下滚动拼整段(当前顶部→最新)。on_frame(v) 每帧后执行(如语音转文字)，
     返回是否需要重抓。向下滚时内容向上移动，新内容出现在底部，逐段贴到画布下方。
 
@@ -139,10 +168,10 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None):
     # 实测导致整段只抓到一屏就误判到底。
     steps = 3
     stall_confirm = 0
+    stall_t0 = None       # 本轮停滞是从什么时候开始的(按时长而不是轮数判到底)
     for i in range(max_steps):
         check_stop()
-        v.scroll(-3, steps=steps)          # 向下(朝最新消息)
-        rgb, gray = v.grab()
+        rgb, gray = v.scroll_settled(-3, steps=steps, before=prev_gray)  # 向下
         if on_frame is not None and on_frame(v):
             rgb, gray = v.grab()
         # 内容向上移动了 d 像素：match_shift(cur, prev) 得到该上移量
@@ -150,6 +179,7 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None):
         if score >= SCORE_OK and d >= 8:
             still = seek = lost = 0
             stall_confirm = 0
+            stall_t0 = None
             frac = d / max(H, 1)
             # 按「实际位移 + 匹配质量」双指标调步长：分数高说明帧间对位很稳，
             # 可以多滚一点少跑几轮；分数一掉就立刻收——对不上位要走跳变恢复，
@@ -172,16 +202,31 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None):
             # 高分停滞：真到底，或分块加载中的假底部(随后跳块会落到下面的分支)
             seek = lost = 0
             steps = 3
-            still += 1
-            if still >= 6:
-                # 别急着收尾：滚不动也可能是分块加载卡住、或滚轮事件被吞了。
-                # 多等一会再确认两轮，真不动才算到底，宁可多花几秒也不半截收工。
+            # 有末尾指纹就直接问「这是不是最新那一屏」，是就立刻收工，
+            # 不用为了保险白等十几秒；不是就说明还有内容，继续耐心等加载。
+            if end_fp is not None and canvas.height > H:
+                de, se = match_shift(gray, end_fp)
+                if se >= 0.5 and de < 8:
+                    progress("  · 画面已与会话末尾一致，抓取完成")
+                    break
+            if stall_t0 is None:
+                stall_t0 = time.time()
+            waited = time.time() - stall_t0
+            # 一条都还没拼进来就「不动」，几乎肯定不是到底了：刚从会话顶部回来时
+            # 微信正在加载最早那批历史，这期间滚轮完全不响应(实测锁死 40 秒)。
+            # 此时必须给足耐心，否则整段一个像素都抓不到。开始拼图之后就不用这么等。
+            patience = 12.0 if canvas.height > H else 60.0
+            if waited >= patience:
                 if stall_confirm < 2:
                     stall_confirm += 1
-                    still = 0
-                    time.sleep(1.6)
+                    stall_t0 = time.time()
+                    time.sleep(2.5)
                     continue
+                progress(f"  ! 连续 {patience * 3 / 60:.0f} 分钟无法继续向下，"
+                         "提前结束；结果可能不完整")
                 break
+            if waited > 3.0 and int(waited) % 6 == 0:
+                progress(f"  · 微信正在加载(已等 {waited:.0f}s)，继续等...")
             time.sleep(0.7)
             continue
         still = 0
@@ -246,10 +291,17 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     # 回到起点上方，再干净地向下拼图。绝不能边滚边转——转写文字在气泡下方、常已滚出当前帧。
     n_voice = 0
     try:
+        # 先把消息区下边界定准，再拍末尾指纹——两者必须用同一套裁剪范围，
+        # 否则指纹和后面的帧尺寸对不上，判「到底」就不准了。
+        v.calibrate_bottom(progress=progress)
+        end_fp = None
         if from_top:
+            end_fp = bottom_fingerprint(v, progress=progress)
             progress("· 先向上滚到会话开头(请勿操作鼠标键盘；急停 ⌃⌥⌘+.)...")
             scroll_to_top(v, max_steps, progress=progress)
-            time.sleep(1.8); v.refresh_geometry()
+            # 这里不再 refresh_geometry()：窗口没动，几何是稳定的，
+            # 重测反而会把上面校准掉的输入框/草稿又框回来。
+            time.sleep(1.5)
         if do_voice:
             from voice import transcribe_down
             progress("· 语音自动转文字：从当前位置向下逐屏转写(较慢；急停 ⌃⌥⌘+.)...")
@@ -260,11 +312,10 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
             for _ in range(steps + 8):
                 check_stop(); v.scroll(2)
             # 大幅回滚后微信的历史分块还在加载，立即下滚会触发重新锚定跳变；多等一会
-            time.sleep(1.8); v.refresh_geometry()
+            time.sleep(1.8)
 
-        v.calibrate_bottom(progress=progress)
         progress("· 从当前顶部位置向下抓取到最新(请勿操作鼠标键盘；急停 ⌃⌥⌘+.)...")
-        canvas = stitch_down(v, max_steps, progress=progress)
+        canvas = stitch_down(v, max_steps, progress=progress, end_fp=end_fp)
     except (StopRequested, FocusLost) as e:
         raise RuntimeError(str(e))
     stitched_path = stitched_out or os.path.join(TMP_DIR, "stitched_full.png")

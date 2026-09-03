@@ -33,6 +33,9 @@
   .zone.inrange{background:rgba(7,193,96,.16)}
   .selinfo{font-size:13px;color:var(--muted);margin:8px 0}
   .fmtrow{gap:12px}
+  .subrow{margin:2px 0 8px 24px}
+  .subrow.off{opacity:.4;pointer-events:none}
+  .sublabel{color:var(--muted);font-size:12.5px}
   .fmtbox{border:1px solid var(--line);border-radius:8px;padding:5px 10px;cursor:pointer;background:#fafbfc}
   .fmtbox:has(input:checked){border-color:var(--green);background:#f0fbf5}
   .ok{color:var(--green);font-weight:600}
@@ -59,7 +62,7 @@
   <div class="sub">把微信当前打开的会话导出成 Word / Markdown · 本地运行不联网</div>
 
   <div class="card" id="cfg">
-    <div class="hint">先在微信里 <b>点开要导出的会话</b>。抓取时会自动滚动微信，<b>期间请勿操作鼠标键盘</b>。<br>⛔ 想中途停下：按 <b>⌃⌥⌘ + .（句号）</b>；或在 Dock 里点开本 App，按「停止抓取」。</div>
+    <div class="hint">先在微信里 <b>点开要导出的会话</b>。抓取时会自动滚动微信，<b>期间请勿操作鼠标键盘</b>。<br>⛔ 想中途停下，随便用哪种都行：<b>连点鼠标 3 下</b>（最省事）／按 <b>⌃⌥⌘ + .（句号）</b>／在 Dock 里点开本 App 按「停止抓取」。</div>
 
     <div class="seg">
       <label class="segbtn"><input type="radio" name="range" id="rangeTop" value="top" checked>
@@ -75,6 +78,13 @@
     </div>
     <div class="row">
       <label><input type="checkbox" id="wantFiles" checked> <b>同时导出聊天里的文件</b>（Word/PDF/PSD/压缩包…）</label>
+    </div>
+    <div class="row subrow" id="fileModeRow">
+      <span class="sublabel">文件位置</span>
+      <label class="fmtbox"><input type="radio" name="filemode" id="fmCopy" value="copy" checked>
+        复制到导出文件夹</label>
+      <label class="fmtbox"><input type="radio" name="filemode" id="fmLink" value="link">
+        只记微信原始位置</label>
     </div>
     <div class="row">
       <label><input type="checkbox" id="autoExport"> 抓完直接导出（不预览、不选区间，用上次勾的格式）</label>
@@ -133,14 +143,20 @@ try{
   if(typeof p.voice==='boolean') $('voice').checked=p.voice;
   if(typeof p.autoExport==='boolean') $('autoExport').checked=p.autoExport;
   if(typeof p.wantFiles==='boolean') $('wantFiles').checked=p.wantFiles;
+  if(p.fileMode==='link') $('fmLink').checked=true; else $('fmCopy').checked=true;
   if(p.range==='here') $('rangeHere').checked=true; else $('rangeTop').checked=true;
   if(typeof p.docx==='boolean') $('fmtDocx').checked=p.docx;
   if(typeof p.md==='boolean') $('fmtMd').checked=p.md;
 }catch(e){}
+function syncFileMode(){
+  // 没勾「同时导出文件」时，位置选项没有意义，置灰
+  $('fileModeRow').classList.toggle('off', !$('wantFiles').checked);
+}
 function savePrefs(){
   localStorage.setItem('wxexport_prefs', JSON.stringify({
     maxSteps:$('maxSteps').value, voice:$('voice').checked, autoExport:$('autoExport').checked,
     wantFiles:$('wantFiles').checked, range:$('rangeTop').checked?'top':'here',
+    fileMode:$('fmLink').checked?'link':'copy',
     docx:$('fmtDocx').checked, md:$('fmtMd').checked}));
 }
 
@@ -239,7 +255,9 @@ function syncFmt(){
   savePrefs();
 }
 $('fmtDocx').onchange=syncFmt; $('fmtMd').onchange=syncFmt;
-syncFmt();
+$('wantFiles').onchange=()=>{ syncFileMode(); savePrefs(); };
+$('fmCopy').onchange=savePrefs; $('fmLink').onchange=savePrefs;
+syncFmt(); syncFileMode();
 
 $('resetSel').onclick=()=>{ startI=null; endI=null; updateSel(); };
 
@@ -252,13 +270,18 @@ async function doExport(){
   savePrefs();
   const name=$('titleInput').value;
   const btn=$('exportBtn'); btn.disabled=true; btn.textContent='导出中…';
-  const res=await api().export(startI, endI, fmts, name, $('wantFiles').checked);
+  const fileMode = $('fmLink').checked ? 'link' : 'copy';
+  const res=await api().export(startI, endI, fmts, name, $('wantFiles').checked, fileMode);
   btn.disabled=false; syncFmt();
   const box=$('result');
   if(!res.ok){ box.innerHTML='<div class="err">✗ '+res.msg+'</div>'; return; }
   let items = res.outputs.map(o=>'<li>'+o+'</li>').join('');
   if(res.images) items += '<li>图片/ &nbsp;<span style="color:#6b7a72">'+res.images+' 张</span></li>';
-  if(res.files)  items += '<li>文件/ &nbsp;<span style="color:#6b7a72">'+res.files+' 个</span></li>';
+  if(res.files){
+    items += res.copied
+      ? '<li>文件/ &nbsp;<span style="color:#6b7a72">'+res.files+' 个</span></li>'
+      : '<li><span style="color:#6b7a72">'+res.files+' 个文件已写入微信原始位置（未复制）</span></li>';
+  }
   let html='<div class="ok">✓ 已导出 '+res.count+' 条消息</div>'
     + '<div class="folder"><div class="fname">📁 '+res.folder_name+'</div>'
     + '<ul>'+items+'</ul>'

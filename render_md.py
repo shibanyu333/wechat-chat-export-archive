@@ -37,10 +37,12 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
         elif m["type"] == "file":
             size = m.get("fsize_real") or m.get("fsize") or ""
             lines.append(f"**{who}：** 📎 **{m['fname']}**" + (f"（{size}）" if size else ""))
+            # 位置只写用户选定的那一个：副本(导出文件夹内，相对路径可随文件夹搬走)
+            # 或微信原始位置(绝对路径，不复制、不占空间)
             if m.get("fcopy"):
-                lines.append(f"> 已复制到：[`{m['fcopy']}`](<{m['fcopy']}>)")
-            if m.get("fpath"):
-                lines.append(f"> 微信原始位置：`{m['fpath']}`")
+                lines.append(f"> 位置：[`{m['fcopy']}`](<{m['fcopy']}>)")
+            elif m.get("fpath"):
+                lines.append(f"> 位置（微信原始）：[`{m['fpath']}`](<{m['fpath']}>)")
             if m.get("fnote"):
                 lines.append(f"> ⚠️ {m['fnote']}")
         else:  # media

@@ -67,6 +67,17 @@ def ocr_image_sliced(path, slice_h=1800, overlap=240):
         if y + slice_h >= H:
             break
         y += slice_h - overlap
+    # 最后一片若只是个矮条(整除剩下的余数)，Vision 对它的识别会明显变差：
+    # 实测 307px 高的尾片把最后一条消息整条漏掉，而同一块区域放进 1800px 的
+    # 正常切片里就能稳定读出来(可复现，不是随机)。所以把尾片改成贴着底边的整片。
+    # 但贴底整片会和上一片大面积重叠(实测 1700px)：同一条消息被两片各报一次、
+    # y 差几像素就躲过了去重，凭空多出十几条。所以给尾片划一条起始线，
+    # 只采纳正常交接点之后的行，重叠部分仍由上一片负责。
+    cutoff = {}
+    if len(offsets) > 1 and H - offsets[-1] < slice_h * 0.6:
+        handoff = offsets[-2] + slice_h - overlap
+        offsets[-1] = max(0, H - slice_h)
+        cutoff[offsets[-1]] = handoff
 
     def run_slice(y):
         y1 = min(H, y + slice_h)
@@ -76,10 +87,12 @@ def ocr_image_sliced(path, slice_h=1800, overlap=240):
             part, _, _ = ocr_image(fp)
         finally:
             os.remove(fp)
+        lo = cutoff.get(y, 0)
         out = []
         for l in part:
             l = dict(l); l["y"] += y
-            out.append(l)
+            if l["y"] >= lo:
+                out.append(l)
         return out
 
     workers = min(6, max(1, len(offsets)))

@@ -155,7 +155,10 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
                 ip.add_run().add_break()
                 sr = ip.add_run(size)
                 sr.font.size = Pt(8); sr.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
-            for label, path in (("副本：", m.get("fcopy")), ("微信原始位置：", m.get("fpath"))):
+            # 位置只写用户选定的那一个
+            chosen = (("位置：", m.get("fcopy")) if m.get("fcopy")
+                      else ("位置（微信原始）：", m.get("fpath")))
+            for label, path in (chosen,):
                 if not path:
                     continue
                 ip.add_run().add_break()

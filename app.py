@@ -86,7 +86,8 @@ class Api:
         except Exception:
             pass
 
-    def export(self, start_i, end_i, formats, name, want_files=True):
+    def export(self, start_i, end_i, formats, name, want_files=True,
+               file_mode="copy"):
         if not self.res:
             return {"ok": False, "msg": "还没有抓取会话"}
         msgs = self.res["msgs"]
@@ -114,8 +115,11 @@ class Api:
         n_hit = n_file = 0
         missing = []
         if want_files:
+            # file_mode="copy" → 把文件复制进本次导出文件夹，文档里用相对路径；
+            # file_mode="link" → 不复制，文档里直接写微信本地的原始绝对路径。
+            dest = lay["files"] if file_mode == "copy" else None
             try:
-                n_hit, n_file = resolve_and_collect(sel, lay["files"])
+                n_hit, n_file = resolve_and_collect(sel, dest)
                 missing = [m.get("fname", "") for m in sel
                            if m.get("type") == "file" and not m.get("fpath")]
             except Exception as e:
@@ -135,6 +139,7 @@ class Api:
                 "folder": d, "folder_name": os.path.basename(d),
                 "count": sum(1 for m in sel if m["type"] != "time"),
                 "images": n_img, "files": n_hit, "files_total": n_file,
+                "copied": file_mode == "copy",
                 "missing": missing[:8]}
 
     def reveal(self, path):

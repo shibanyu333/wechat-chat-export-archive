@@ -25,8 +25,10 @@ def main():
     ap.add_argument("--out", help="指定导出文件夹(默认 导出结果/会话名_月日-时分/)")
     ap.add_argument("--keep-image", action="store_true", help="保留拼接长图")
     ap.add_argument("--from-image", help="不抓取，直接重新解析已有的拼接长图(改了解析规则后重出文档用)")
+    ap.add_argument("--file-mode", choices=["copy", "link"], default="copy",
+                    help="copy=文件复制进导出文件夹(默认)；link=只在文档里写微信原始位置")
     ap.add_argument("--no-copy-files", action="store_true",
-                    help="聊天里的文件只写出位置，不复制副本")
+                    help="等同 --file-mode link（旧参数，保留兼容）")
     args = ap.parse_args()
 
     print("== 微信聊天记录导出(命令行) ==")
@@ -67,8 +69,9 @@ def _finish(args, res):
     date = time.strftime("%Y-%m-%d %H:%M")
 
     # 聊天里的文件：微信把它们明文存在本地，按文件名找回来，一并放进本次导出文件夹
+    link_only = args.no_copy_files or args.file_mode == "link"
     n_hit, n_file = resolve_and_collect(
-        msgs, None if args.no_copy_files else lay["files"], progress=print)
+        msgs, None if link_only else lay["files"], progress=print)
 
     outputs = []
     if "docx" in fmts:

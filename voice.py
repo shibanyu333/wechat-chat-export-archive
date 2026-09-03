@@ -6,7 +6,7 @@ import os, re, time, subprocess
 import numpy as np
 import Quartz
 from PIL import Image
-from wechat_ui import move_mouse, check_stop, TMP_DIR
+from wechat_ui import move_mouse, check_stop, TMP_DIR, note_self_click
 from geometry import capture_window
 from ocr import ocr_image
 
@@ -16,6 +16,9 @@ ZH_RE = re.compile(r'转文字|转成文字|转换为文字|转为文字|Convert
 
 
 def _click(gx, gy, button="left"):
+    # 声明这是工具自己点的，别被「连点鼠标=停止」当成用户要中断
+    if button == "left":
+        note_self_click()
     move_mouse(gx, gy)
     if button == "right":
         d, u, b = (Quartz.kCGEventRightMouseDown, Quartz.kCGEventRightMouseUp,

@@ -24,6 +24,51 @@ class StopRequested(Exception):
 
 _soft_stop = False
 
+# ==== 连点鼠标 = 停止 ====
+# 抓取期间微信被顶到最前、App 已最小化，用户想中断时最本能的动作是猛点鼠标，
+# 而不是去记快捷键或翻 Dock。所以把「短时间内连点几下」也当成停止信号。
+# 用 CGEventSourceCounterForEventType 读系统级点击累计数即可，不用装事件监听、
+# 不需要额外权限。工具自己产生的点击(语音转文字要右键菜单再点「转文字」)
+# 通过 note_self_click() 抵扣，不会自己把自己停掉。
+CLICK_STOP_N = 3            # 连点几下算停止
+CLICK_STOP_WINDOW = 1.6     # 这几下要落在多少秒内
+
+_click_last = None          # 上次读到的系统点击累计数
+_click_marks = []           # 判定窗口内的用户点击时刻
+_click_allow = 0            # 待抵扣的「工具自己点的」次数
+
+
+def _click_counter():
+    return int(Quartz.CGEventSourceCounterForEventType(
+        Quartz.kCGEventSourceStateCombinedSessionState,
+        Quartz.kCGEventLeftMouseDown))
+
+
+def note_self_click(n=1):
+    """工具自己要点鼠标前调用，声明接下来的 n 次点击不是用户操作。"""
+    global _click_allow
+    _click_allow += n
+
+
+def clicks_requested_stop():
+    """用户是否在连点鼠标要求停止。"""
+    global _click_last, _click_allow
+    now = time.time()
+    cnt = _click_counter()
+    if _click_last is None:
+        _click_last = cnt
+        return False
+    new = cnt - _click_last
+    _click_last = cnt
+    if new > 0:
+        skip = min(new, _click_allow)     # 先抵扣工具自己点的
+        _click_allow -= skip
+        for _ in range(new - skip):
+            _click_marks.append(now)
+    while _click_marks and now - _click_marks[0] > CLICK_STOP_WINDOW:
+        _click_marks.pop(0)
+    return len(_click_marks) >= CLICK_STOP_N
+
 
 def request_stop():
     """App 停止按钮调用：置软停止标记，抓取循环下次轮询时中断。"""
@@ -32,8 +77,13 @@ def request_stop():
 
 
 def clear_stop():
-    global _soft_stop
+    """每次开抓前复位：清软停止标记，并把点击计数重新对基线，
+    免得抓取前用户点 App 按钮的那几下被算进「连点停止」。"""
+    global _soft_stop, _click_last, _click_allow
     _soft_stop = False
+    _click_last = _click_counter()
+    _click_allow = 0
+    _click_marks.clear()
 
 
 _STOP_STATE = Quartz.kCGEventSourceStateCombinedSessionState
@@ -52,9 +102,11 @@ def stop_requested():
 
 
 def check_stop():
-    """在抓取循环里调用；若停止按钮或快捷键触发则抛出 StopRequested 中断整个流程。"""
+    """在抓取循环里调用。停止按钮 / 快捷键 / 连点鼠标三种方式都能中断整个流程。"""
     if _soft_stop or stop_requested():
         raise StopRequested("已手动停止")
+    if clicks_requested_stop():
+        raise StopRequested(f"检测到连点鼠标 {CLICK_STOP_N} 下，已停止抓取")
 
 
 def wechat_pid():
@@ -182,6 +234,44 @@ class WeChatView:
 
     def scroll(self, lines, steps=3, settle=0.32):
         scroll_lines(self.pane_cx, self.pane_cy, lines, steps, settle)
+
+    @staticmethod
+    def frames_settled(a, b, tol=0.6):
+        """两帧是否已经停稳。抽稀到 1/64 的点上比，够灵敏又几乎不花时间。"""
+        h = min(a.shape[0], b.shape[0])
+        return float(np.abs(a[:h:8, ::8] - b[:h:8, ::8]).mean()) < tol
+
+    def scroll_settled(self, lines, steps=3, max_wait=0.8, before=None,
+                       no_motion_grace=0.25):
+        """滚动，然后等画面真正停下来再把这一帧返回。
+
+        微信是平滑滚动，截在动画中间帧会让帧间匹配彻底失效——实测匹配分数从
+        1.000 掉到 0.238，而抓取循环会把低分读成「滚不动了」，整段只抓到一屏
+        就收工。原来靠固定 settle=0.32s 硬等：滚得多时可能还不够，滚得少时
+        早就停了却还在白等，而这一项占了每轮耗时的六成。
+        改成连续两帧几乎一致就认为停稳，通常一两次探测(60~90ms)就够；
+        遇到图片正在异步加载这类永远不稳的情况，用 max_wait 兜底后照常返回。
+
+        必须传 before(滚动前那一帧)：滚轮事件是异步投递的，紧接着连拍两帧很可能
+        两帧都拍在「微信还没开始动」的时刻，光看「两帧一致」会把它误判成已经停稳，
+        于是返回滚动前的画面、位移恒为 0，抓取循环读成「到底了」——实测整段只
+        抓出 6 条消息。所以要求画面相对 before 确实变过，才承认这次滚动完成了。
+        真到底时画面本来就不会变，会一直等到 max_wait 再返回，位移 0 正是想要的。"""
+        scroll_lines(self.pane_cx, self.pane_cy, lines, steps, settle=0.0)
+        rgb, gray = self.grab()
+        t0 = time.time()
+        while time.time() - t0 < max_wait:
+            r2, g2 = self.grab()
+            moved = before is None or not self.frames_settled(before, g2)
+            if moved and self.frames_settled(gray, g2):
+                return r2, g2
+            if not moved and time.time() - t0 > no_motion_grace:
+                # 宽限期内画面一点没动 = 这一下真的滚不动了(到顶/到底)，
+                # 不必再干等到 max_wait。抓到会话末尾时要连续判很多轮停滞，
+                # 每轮白等 0.8s 的话光「确认到底」就要花掉 38 秒(实测)。
+                return r2, g2
+            rgb, gray = r2, g2
+        return rgb, gray
 
     def _full_gray(self):
         a = self._full_rgb()
