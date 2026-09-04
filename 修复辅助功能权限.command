@@ -3,7 +3,8 @@
 # 必须在 Terminal.app 里运行（它有完全磁盘访问权限，SIP 才允许改 TCC.db）。
 
 DB="/Library/Application Support/com.apple.TCC/TCC.db"
-APP="/Users/shibanyu/聊天导出/微信导出.app"
+# 从脚本自身位置推出 App 路径，不写死用户名/路径
+APP="$(cd "$(dirname "$0")" && pwd)/微信导出.app"
 
 echo "== 修复前 =="
 sudo sqlite3 "$DB" \

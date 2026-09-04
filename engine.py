@@ -49,7 +49,7 @@ def detect_title(v):
     if not lines:
         return None
     # 会话名是这块区域里最靠上、最靠左的那行。不能按"最宽"挑：顶栏下沿如果正好
-    # 露出一条居中的系统消息("Michael 撤回了一条消息")，它比会话名更宽，实测会
+    # 露出一条居中的系统消息("XXX 撤回了一条消息")，它比会话名更宽，实测会
     # 被当成会话名写进文件名。
     lines.sort(key=lambda l: l["y"])
     band = [l for l in lines if l["y"] - lines[0]["y"] < 20 * s]
