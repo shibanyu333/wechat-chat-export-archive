@@ -16,6 +16,11 @@ _applog.txt
 # （旧版打包时还会把打包者的用户名路径写死在里面）
 微信导出.app/
 
+# 打包产物（100MB 的 .app 和 41MB 的 .dmg 不入库，走 GitHub Releases 发布）
+build/
+dist/
+*.spec.bak
+
 # 系统与缓存
 .DS_Store
 __pycache__/

@@ -8,9 +8,10 @@ import Quartz
 import AppKit
 from geometry import find_main_window, capture_window, detect_regions
 
-# 临时/调试文件统一放 _tmp/，不污染项目目录。
-# 锚定到本模块所在目录，避免从 .app 启动时(cwd=/)写到根目录。
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 临时/调试文件统一放 _tmp/。源码运行时在项目目录里；打包成独立 App 之后
+# .app 内部不可写，data_root() 会把它挪到 ~/Documents/ 下。
+from appdirs_local import data_root
+BASE_DIR = data_root()
 TMP_DIR = os.path.join(BASE_DIR, "_tmp")
 os.makedirs(TMP_DIR, exist_ok=True)
 _TMP = os.path.join(TMP_DIR, "frame_tmp.png")

@@ -4,8 +4,12 @@
 import os, io, json, time, base64
 HERE = os.path.dirname(os.path.abspath(__file__))
 # 双击 .app 启动时工作目录是 /(根目录)，相对路径会写到根目录而失败；
-# 必须在导入 engine/wechat_ui 之前切到项目目录。
-os.chdir(HERE)
+# 必须在导入 engine/wechat_ui 之前切到一个确定的目录。
+from appdirs_local import data_root, resource_path
+try:
+    os.chdir(data_root())
+except OSError:
+    pass          # 目录被删也不致命：程序内部一律用绝对路径
 import webview
 from engine import capture_and_parse, preflight
 from wechat_ui import request_stop, clear_stop
@@ -157,7 +161,7 @@ class Api:
 def main():
     global window
     api = Api()
-    html = os.path.join(HERE, "ui", "index.html")
+    html = resource_path("ui", "index.html")
     window = webview.create_window("微信聊天记录导出", url=html, js_api=api,
                                    width=620, height=880, min_size=(520, 640))
     webview.start()

@@ -13,8 +13,9 @@
 文件夹名带时间戳，重复导出同一个会话也不会覆盖上一次的结果。
 """
 import os, re, time
+from appdirs_local import data_root
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = data_root()
 OUT_ROOT = os.path.join(BASE_DIR, "导出结果")
 
 DOC_NAME = "聊天记录"          # 文档统一叫这个，会话名体现在文件夹上

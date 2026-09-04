@@ -12,6 +12,9 @@ from parse3 import parse_image
 
 def preflight():
     """返回 (ok, message)。"""
+    # 用户可能把导出/临时目录删了或挪走(打包版这些目录在 ~/Documents 下，
+    # 是用户随手能动的)，那样后续截图会 Errno 2。每次开抓前补建一次。
+    os.makedirs(TMP_DIR, exist_ok=True)
     try:
         subprocess.check_output(["pgrep", "-x", "WeChat"])
     except subprocess.CalledProcessError:
